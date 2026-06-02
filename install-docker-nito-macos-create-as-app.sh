@@ -6,13 +6,23 @@
 set -euo pipefail
 
 APP_NAME="${APP_NAME:-nito}"
-APP_BUNDLE="${APP_BUNDLE:-$HOME/Applications/${APP_NAME}.app}"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/aktak/builds/main/install-docker-nito-macos.sh}"
 BUNDLE_ID="${BUNDLE_ID:-sk.park.cito.install-nito}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This builder only runs on macOS." >&2
   exit 1
+fi
+
+# Prefer the system /Applications (what users mean by "Applications folder" and
+# always Spotlight-indexed); fall back to ~/Applications if it isn't writable.
+if [[ -z "${APP_BUNDLE:-}" ]]; then
+  if [[ -w /Applications ]]; then
+    APP_BUNDLE="/Applications/${APP_NAME}.app"
+  else
+    APP_BUNDLE="$HOME/Applications/${APP_NAME}.app"
+    mkdir -p "$HOME/Applications"
+  fi
 fi
 
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
@@ -46,7 +56,12 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/launcher"
 # Strip Gatekeeper quarantine so the bundle we just built locally launches cleanly.
 xattr -dr com.apple.quarantine "$APP_BUNDLE" 2>/dev/null || true
 
-# Nudge Finder/LaunchServices to pick up the new bundle.
+# Register with LaunchServices so Finder AND Spotlight see it immediately.
+# (touch alone only bumps mtime; it does not register the bundle.)
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -f "$APP_BUNDLE" || true
+fi
 touch "$APP_BUNDLE"
 
 echo "Created: $APP_BUNDLE"

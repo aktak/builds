@@ -75,14 +75,16 @@ ensure_mssql2022() {
   fi
 
   log "Container '$MSSQL_NAME' not found. Creating it..."
-  mkdir -p "$MSSQL_VOLUME"
+  # Only the backup folder is persisted to the host — DB data lives inside the
+  # container, so dropping it wipes databases (restore from a .bak to recover).
+  ensure_backup_dir
   docker run -d --name "$MSSQL_NAME" \
     --network "$NET_NAME" \
     -e "ACCEPT_EULA=Y" \
     -e "MSSQL_SA_PASSWORD=StrongP@sswordSql2022" \
     -e "MSSQL_PID=developer" \
     -p 1433:1433 \
-    -v "$MSSQL_VOLUME:/var/opt/mssql" \
+    -v "$MSSQL_BACKUP_DIR:$MSSQL_BACKUP_CONTAINER_DIR" \
     "$MSSQL_IMAGE"
   log "Container '$MSSQL_NAME' created and started."
 }
@@ -130,6 +132,15 @@ load_sql_ctx() {
     err "sqlcmd not found inside container '$MSSQL_NAME'."
     return 1
   fi
+  # Probe the connection so callers fail loudly with the real reason instead of
+  # the parsing pipelines silently swallowing sqlcmd's stderr.
+  local probe_err
+  probe_err="$(docker exec "$MSSQL_NAME" "$SQLCMD" \
+    -S localhost -U "$SQL_LOGIN" -P "$SQL_PASSW" -C \
+    -Q "SET NOCOUNT ON; SELECT 1" 2>&1 >/dev/null)" && return 0
+  err "Cannot connect to '$MSSQL_NAME':"
+  err "${probe_err:-<no output — container starting or not reachable>}"
+  return 1
 }
 
 # Does a database exist on the server?
@@ -332,7 +343,7 @@ prompt_set_dbname() {
        "$NITO_CONFIG" > "$tmp"; then
     mv "$tmp" "$NITO_CONFIG"
     log "CITO.config DBName set to '$picked'."
-    log "Restart '$NITO_NAME' to apply: docker restart $NITO_NAME"
+    recreate_nitodev
   else
     rm -f "$tmp"
     err "Failed to update $NITO_CONFIG."
@@ -528,26 +539,36 @@ prompt_restore_bak() {
   restore_database "$bak_basename" "$target_db"
 }
 
+open_app() {
+  local url="http://localhost:8080/Window.aspx?QTabs=1"
+  log "Opening $url ..."
+  open "$url"
+}
+
 prompt_db_menu() {
   ensure_backup_dir
   while true; do
     echo
     log "SQL actions:"
+    printf "  o) Open App\n"
     printf "  l) List databases\n"
-    printf "  s) Set DBName in CITO.config\n"
+    printf "  s) Set database in CITO.config\n"
     printf "  r) Restore a .bak\n"
     printf "  b) Backup a database\n"
     printf "  d) Delete a database\n"
     printf "  e) Exit (or any other key)\n\n"
     local choice choice_lc
-    read -rp "Choose [l/s/r/b/d/e]: " choice
+    read -rp "Choose [o/l/s/r/b/d/e]: " choice
     choice_lc="$(printf %s "$choice" | tr 'A-Z' 'a-z')"
+    # Run actions non-fatally: under `set -e` a non-zero return from a bare
+    # case branch would kill the whole script (e.g. SQL not ready yet).
     case "$choice_lc" in
-      l) prompt_list_dbs ;;
-      s) prompt_set_dbname ;;
-      r) prompt_restore_bak ;;
-      b) prompt_backup_db ;;
-      d) prompt_delete_db ;;
+      l) prompt_list_dbs   || warn "List failed — is '$MSSQL_NAME' up and accepting connections?" ;;
+      s) prompt_set_dbname || warn "Set database failed — is '$MSSQL_NAME' up and accepting connections?" ;;
+      r) prompt_restore_bak || warn "Restore failed — is '$MSSQL_NAME' up and accepting connections?" ;;
+      b) prompt_backup_db  || warn "Backup failed — is '$MSSQL_NAME' up and accepting connections?" ;;
+      d) prompt_delete_db  || warn "Delete failed — is '$MSSQL_NAME' up and accepting connections?" ;;
+      o) open_app          || warn "Could not open the app URL." ;;
       *) log "Leaving SQL menu."; return 0 ;;
     esac
   done
@@ -581,9 +602,19 @@ EOF
 
 # Pull the latest image, prompting for ghcr.io credentials only if the pull
 # fails (i.e. not already authenticated to the private registry).
+# Print the digest + creation date of the locally resolved image so the
+# version in use is always verifiable.
+report_nito_image() {
+  local digest created
+  digest="$(docker image inspect --format '{{range .RepoDigests}}{{.}} {{end}}' "$NITO_IMAGE" 2>/dev/null)"
+  created="$(docker image inspect --format '{{.Created}}' "$NITO_IMAGE" 2>/dev/null)"
+  log "Using image: ${digest:-$NITO_IMAGE} (built ${created:-unknown})"
+}
+
 pull_nito_image() {
   log "Pulling latest '$NITO_IMAGE'..."
   if docker pull "$NITO_IMAGE"; then
+    report_nito_image
     return 0
   fi
 
@@ -603,12 +634,18 @@ pull_nito_image() {
   unset gh_token
 
   if docker pull "$NITO_IMAGE"; then
+    report_nito_image
     return 0
   fi
 
   # Couldn't refresh — fall back to a cached copy if one exists (e.g. offline).
   if docker image inspect "$NITO_IMAGE" >/dev/null 2>&1; then
-    warn "Could not pull latest; using locally cached image."
+    warn "############################################################"
+    warn "# COULD NOT FETCH THE LATEST '$NITO_IMAGE'."
+    warn "# Continuing with the OLD locally cached image — it may be"
+    warn "# OUTDATED. Fix connectivity/ghcr.io auth and rerun to update."
+    warn "############################################################"
+    report_nito_image
     return 0
   fi
   err "Unable to obtain image '$NITO_IMAGE'."
@@ -624,6 +661,17 @@ run_nitodev() {
     -v "$NITO_LOG_DIR:/app/Log" \
     "$NITO_IMAGE"
   log "Container '$NITO_NAME' created and started."
+}
+
+recreate_nitodev() {
+  # App caches CITO.config at startup, so a host-side edit needs a fresh
+  # container to take effect. Drop + recreate (cheap; no image pull).
+  if docker ps -a --format '{{.Names}}' | grep -qx "$NITO_NAME"; then
+    log "Recreating '$NITO_NAME' to apply CITO.config changes..."
+    docker rm -f "$NITO_NAME" >/dev/null
+  fi
+  run_nitodev
+  connect_network "$NITO_NAME"
 }
 
 ensure_nitodev() {
