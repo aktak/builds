@@ -56,13 +56,13 @@ connect_network() {
   fi
 }
 
-MSSQL_NAME="nito-sql2022"
-MSSQL_IMAGE="mcr.microsoft.com/mssql/server:2022-latest"
+MSSQL_NAME="nito-sql2025"
+MSSQL_IMAGE="mcr.microsoft.com/mssql/server:2025-latest"
 MSSQL_VOLUME="$HOME/nito/sql"
 MSSQL_BACKUP_DIR="$MSSQL_VOLUME/backup"
 MSSQL_BACKUP_CONTAINER_DIR="/var/opt/mssql/backup"
 
-ensure_mssql2022() {
+ensure_mssql2025() {
   if docker ps -a --format '{{.Names}}' | grep -qx "$MSSQL_NAME"; then
     if docker ps --format '{{.Names}}' | grep -qx "$MSSQL_NAME"; then
       log "Container '$MSSQL_NAME' is already running."
@@ -552,8 +552,8 @@ prompt_db_menu() {
     log "SQL actions:"
     printf "  o) Open App\n"
     printf "  l) List databases\n"
-    printf "  s) Set database in CITO.config\n"
     printf "  r) Restore a .bak\n"
+    printf "  s) Set database in CITO.config\n"
     printf "  b) Backup a database\n"
     printf "  d) Delete a database\n"
     printf "  e) Exit (or any other key)\n\n"
@@ -564,8 +564,8 @@ prompt_db_menu() {
     # case branch would kill the whole script (e.g. SQL not ready yet).
     case "$choice_lc" in
       l) prompt_list_dbs   || warn "List failed — is '$MSSQL_NAME' up and accepting connections?" ;;
-      s) prompt_set_dbname || warn "Set database failed — is '$MSSQL_NAME' up and accepting connections?" ;;
       r) prompt_restore_bak || warn "Restore failed — is '$MSSQL_NAME' up and accepting connections?" ;;
+      s) prompt_set_dbname || warn "Set database failed — is '$MSSQL_NAME' up and accepting connections?" ;;
       b) prompt_backup_db  || warn "Backup failed — is '$MSSQL_NAME' up and accepting connections?" ;;
       d) prompt_delete_db  || warn "Delete failed — is '$MSSQL_NAME' up and accepting connections?" ;;
       o) open_app          || warn "Could not open the app URL." ;;
@@ -590,7 +590,7 @@ ensure_app_config() {
     cat > "$NITO_CONFIG" <<'EOF'
 <?xml version="1.0" encoding="UTF-8" ?>
 <appSettings>
-    <add key="DBServer" value="nito-sql2022" />
+    <add key="DBServer" value="nito-sql2025" />
     <add key="DBName" value="dbSCHEMA" />
     <add key="DBLogin" value="sa" />
     <add key="DBPassw" value="StrongP@sswordSql2022" />
@@ -716,7 +716,7 @@ if command -v docker >/dev/null 2>&1; then
   ensure_running || exit 1
   ensure_network
   ensure_app_config
-  ensure_mssql2022
+  ensure_mssql2025
   ensure_nitodev
   prompt_db_menu
   exit 0
@@ -740,7 +740,7 @@ if command -v brew >/dev/null 2>&1; then
   ensure_running || exit 1
   ensure_network
   ensure_app_config
-  ensure_mssql2022
+  ensure_mssql2025
   ensure_nitodev
   prompt_db_menu
   exit 0
@@ -778,6 +778,6 @@ log "Docker Desktop installed."
 ensure_running || exit 1
 ensure_network
 ensure_app_config
-ensure_mssql2022
+ensure_mssql2025
 ensure_nitodev
 prompt_db_menu
