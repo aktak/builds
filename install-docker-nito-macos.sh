@@ -540,7 +540,10 @@ prompt_restore_bak() {
 }
 
 open_app() {
-  local url="http://localhost:8080/Window.aspx?QTabs=1"
+  # Use the resolved host port; fall back to reading it from the container.
+  local port="${NITO_PORT:-$(get_nito_port)}"
+  port="${port:-$NITO_DEFAULT_PORT}"
+  local url="http://localhost:${port}/Window.aspx?QTabs=1"
   log "Opening $url ..."
   open "$url"
 }
@@ -579,6 +582,28 @@ NITO_IMAGE="ghcr.io/aktak/nito:dev"
 NITO_APP_DIR="$HOME/nito/app-dev"
 NITO_CONFIG="$NITO_APP_DIR/CITO.config"
 NITO_LOG_DIR="$NITO_APP_DIR/Log"
+NITO_CONTAINER_PORT=8080   # port the app listens on inside the container
+NITO_DEFAULT_PORT=80       # default host port offered on first create
+NITO_PORT=""               # resolved host port (asked on create / read from container)
+
+# Read the published host port for the app from an existing container.
+get_nito_port() {
+  docker inspect \
+    --format "{{(index (index .NetworkSettings.Ports \"${NITO_CONTAINER_PORT}/tcp\") 0).HostPort}}" \
+    "$NITO_NAME" 2>/dev/null
+}
+
+# Ask which host port to publish the app on (first create only). Default 80.
+prompt_nito_port() {
+  local input
+  read -rp "Host port to publish the app on [$NITO_DEFAULT_PORT]: " input
+  input="${input:-$NITO_DEFAULT_PORT}"
+  if [[ ! "$input" =~ ^[0-9]+$ ]] || (( input < 1 || input > 65535 )); then
+    warn "Invalid port '$input' — using default $NITO_DEFAULT_PORT."
+    input="$NITO_DEFAULT_PORT"
+  fi
+  NITO_PORT="$input"
+}
 
 # Make sure a host-side CITO.config exists to mount into the container. On first
 # run it's written with the default below (DBServer points at the SQL container);
@@ -654,19 +679,23 @@ pull_nito_image() {
 
 run_nitodev() {
   ensure_app_config
+  : "${NITO_PORT:=$NITO_DEFAULT_PORT}"
   docker run -d --name "$NITO_NAME" \
     --network "$NET_NAME" \
-    -p 8080:8080 \
+    -p "${NITO_PORT}:${NITO_CONTAINER_PORT}" \
     -v "$NITO_CONFIG:/app/CITO.config" \
     -v "$NITO_LOG_DIR:/app/Log" \
     "$NITO_IMAGE"
-  log "Container '$NITO_NAME' created and started."
+  log "Container '$NITO_NAME' created and started on host port $NITO_PORT."
 }
 
 recreate_nitodev() {
   # App caches CITO.config at startup, so a host-side edit needs a fresh
   # container to take effect. Drop + recreate (cheap; no image pull).
   if docker ps -a --format '{{.Names}}' | grep -qx "$NITO_NAME"; then
+    # Preserve the port the container was created with — don't re-ask.
+    NITO_PORT="$(get_nito_port)"
+    [[ -z "$NITO_PORT" ]] && NITO_PORT="$NITO_DEFAULT_PORT"
     log "Recreating '$NITO_NAME' to apply CITO.config changes..."
     docker rm -f "$NITO_NAME" >/dev/null
   fi
@@ -682,6 +711,11 @@ ensure_nitodev() {
   latest_img="$(docker image inspect --format '{{.Id}}' "$NITO_IMAGE")"
 
   if docker ps -a --format '{{.Names}}' | grep -qx "$NITO_NAME"; then
+    # Container exists — reuse its published host port (don't ask).
+    NITO_PORT="$(get_nito_port)"
+    [[ -z "$NITO_PORT" ]] && NITO_PORT="$NITO_DEFAULT_PORT"
+    log "Container '$NITO_NAME' is published on host port $NITO_PORT."
+
     local current_img
     current_img="$(docker inspect --format '{{.Image}}' "$NITO_NAME")"
     if [[ "$current_img" != "$latest_img" ]]; then
@@ -700,7 +734,9 @@ ensure_nitodev() {
     return 0
   fi
 
+  # First create — ask which host port to publish on (default 80).
   log "Container '$NITO_NAME' not found. Creating it from $NITO_IMAGE..."
+  prompt_nito_port
   run_nitodev
 }
 
