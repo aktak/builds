@@ -588,9 +588,26 @@ NITO_PORT=""               # resolved host port (asked on create / read from con
 
 # Read the published host port for the app from an existing container.
 get_nito_port() {
+  # A stopped container has empty .NetworkSettings.Ports, so the template errors
+  # and inspect exits non-zero — swallow it (|| true) so `set -e` callers don't die.
   docker inspect \
     --format "{{(index (index .NetworkSettings.Ports \"${NITO_CONTAINER_PORT}/tcp\") 0).HostPort}}" \
-    "$NITO_NAME" 2>/dev/null
+    "$NITO_NAME" 2>/dev/null || true
+}
+
+# Block until a container is at least running (not waiting for app readiness).
+# We only need it "up" so its port mapping / inspect data become valid before we
+# continue. Returns 0 once .State.Running is true, non-zero on timeout.
+wait_container_running() {
+  local name="$1" _
+  for _ in $(seq 1 30); do
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  warn "Container '$name' did not reach 'running' within 30s."
+  return 1
 }
 
 # Ask which host port to publish the app on (first create only). Default 80.
@@ -686,6 +703,7 @@ run_nitodev() {
     -v "$NITO_CONFIG:/app/CITO.config" \
     -v "$NITO_LOG_DIR:/app/Log" \
     "$NITO_IMAGE"
+  wait_container_running "$NITO_NAME" || true
   log "Container '$NITO_NAME' created and started on host port $NITO_PORT."
 }
 
@@ -729,6 +747,12 @@ ensure_nitodev() {
     else
       log "Container '$NITO_NAME' is up to date but stopped. Starting it..."
       docker start "$NITO_NAME"
+      wait_container_running "$NITO_NAME" || true
+      # Port mapping is only readable once running — refresh from the live container.
+      local started_port
+      started_port="$(get_nito_port)"
+      [[ -n "$started_port" ]] && NITO_PORT="$started_port"
+      log "Container '$NITO_NAME' is running on host port $NITO_PORT."
     fi
     connect_network "$NITO_NAME"
     return 0
